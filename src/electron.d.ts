@@ -11,6 +11,34 @@ export interface ElectronAPI {
   logsTail: (target: string, files: string[], mode: 'last' | 'follow', lines?: number) => Promise<{ success: boolean; streamId?: string; error?: string }>;
   logsStop: (streamId: string) => Promise<{ success: boolean; error?: string }>;
   executeCommand: (target: string, command: string) => Promise<{ success: boolean; exitCode?: number; output?: string; error?: string; commandId?: string }>;
+  /** Demo-only git data; backed by in-browser mock implementation. */
+  gitInfo?: (target: string) => Promise<{
+    success: boolean;
+    branch?: string;
+    changes?: Array<{ status: string; file: string }>;
+    hasChanges?: boolean;
+    error?: string;
+  }>;
+  gitDiff?: (target: string, file: string) => Promise<{ success: boolean; diff?: string; file?: string; error?: string }>;
+  supervisorVenvs?: () => Promise<{ success: boolean; venvs?: Record<string, string>; error?: string }>;
+  /** Demo-only Docker data; no real Docker socket connection. */
+  dockerContainers?: () => Promise<{
+    success: boolean;
+    containers?: Array<{
+      id: string;
+      name: string;
+      image: string;
+      status: string;
+      state: string;
+      ports: string;
+      created: string;
+    }>;
+    error?: string;
+  }>;
+  dockerAction?: (
+    containerId: string,
+    action: 'start' | 'stop' | 'restart'
+  ) => Promise<{ success: boolean; stderr?: string; output?: string; error?: string }>;
 
   // Main → Renderer (events)
   onRdeStatus: (callback: (data: { state: string; message?: string }) => void) => void;

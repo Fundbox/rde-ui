@@ -3,7 +3,18 @@ import type { Service } from '../types';
 import { useIPC } from '../hooks/useIPC';
 import { useToast } from '../contexts/ToastContext';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
+import { MachineStats } from './MachineStats';
+import { send, on } from '../hooks/useWebSocket';
 import './ServicesPanel.css';
+
+interface ProcInfo { name: string; pid: number | null; cpu: number | null; memKb: number | null }
+
+function fmtMem(kb: number | null): string {
+  if (kb == null) return '';
+  if (kb >= 1024 * 1024) return `${(kb / 1024 / 1024).toFixed(1)}G`;
+  if (kb >= 1024) return `${(kb / 1024).toFixed(0)}M`;
+  return `${kb}K`;
+}
 
 interface ServicesPanelProps {
   target: string | null;
@@ -14,8 +25,10 @@ interface GroupedServices {
   [group: string]: Service[];
 }
 
-export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
+export function ServicesPanel({ target }: ServicesPanelProps) {
   const [services, setServices] = useState<Service[]>([]);
+  const [venvVersions, setVenvVersions] = useState<Record<string, string>>({});
+  const [procs, setProcs] = useState<Record<string, ProcInfo>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -27,17 +40,31 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
     state: true,
     extra: false,
   });
-  const { getSupervisorStatus, restartService, startService, stopService, bulkServiceOperation, onSupervisorStatusResult } = useIPC();
+  const { getSupervisorStatus, restartService, startService, stopService, bulkServiceOperation } = useIPC();
   const { showToast } = useToast();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  // Subscribe to supervisor-status via WebSocket — server pushes every 10s
+  // and immediately after any control action.
   useEffect(() => {
-    const cleanup = onSupervisorStatusResult((data) => {
-      setServices(data.services);
-      setLoading(false);
+    send({ type: 'subscribe:supervisor-status' });
+
+    const offStatus = on('supervisor-status', (msg) => {
+      const services = msg.services as Service[] | undefined;
+      if (Array.isArray(services) && services.length) {
+        setServices(services);
+        setLoading(false);
+      }
     });
-    return cleanup;
-  }, [onSupervisorStatusResult]);
+
+    const offOpen = on('ws:open', () => send({ type: 'subscribe:supervisor-status' }));
+
+    return () => {
+      send({ type: 'unsubscribe:supervisor-status' });
+      offStatus();
+      offOpen();
+    };
+  }, []);
 
   // Keyboard shortcuts
   useKeyboardShortcuts([
@@ -66,33 +93,65 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
     }
   }, []);
 
-  // Automatically fetch supervisor status when connected
+  // Fetch venv Python versions once on mount
   useEffect(() => {
-    if (connectionState === 'connected') {
-      console.log('[ServicesPanel] Connection restored, fetching services...');
-      const timer = setTimeout(() => {
-        setLoading(true);
-        getSupervisorStatus(target || '').catch((error) => {
-          console.error('Failed to refresh status:', error);
-          setLoading(false);
-          showToast('Failed to refresh services', 'error');
-        });
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [connectionState, target, getSupervisorStatus, showToast]);
+    (window as any).electronAPI?.supervisorVenvs?.().then((result: any) => {
+      if (result?.success && result.venvs) {
+        setVenvVersions(result.venvs);
+      }
+    }).catch(() => {});
+  }, []);
 
-  const handleRefresh = async () => {
-    if (!isConnected) return;
+  // Subscribe to per-service CPU/mem via WebSocket (server pushes every 5s)
+  useEffect(() => {
+    send({ type: 'subscribe:procs' });
+
+    const off = on('procs', (msg) => {
+      if (msg.success && Array.isArray(msg.procs)) {
+        const map: Record<string, ProcInfo> = {};
+        for (const p of msg.procs as ProcInfo[]) map[p.name] = p;
+        setProcs(map);
+      }
+    });
+
+    const offOpen = on('ws:open', () => send({ type: 'subscribe:procs' }));
+
+    return () => {
+      send({ type: 'unsubscribe:procs' });
+      off();
+      offOpen();
+    };
+  }, []);
+
+  // Fetch services on mount (always connected when running on RDE)
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const result = await getSupervisorStatus(target || '');
+        console.log('[ServicesPanel] supervisor status result:', result);
+        if (result?.services?.length) {
+          setServices(result.services);
+        } else {
+          console.warn('[ServicesPanel] No services in response:', result);
+          showToast('No services returned', 'warning');
+        }
+      } catch (error) {
+        console.error('[ServicesPanel] Failed to fetch services:', error);
+        showToast('Failed to load services', 'error');
+      } finally {
+        setLoading(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const handleRefresh = () => {
     setLoading(true);
-    try {
-      await getSupervisorStatus(target || '');
-      showToast('Services refreshed', 'success', 2000);
-    } catch (error) {
-      console.error('Failed to refresh status:', error);
-      setLoading(false);
-      showToast('Failed to refresh services', 'error');
-    }
+    // Request an immediate one-shot push from the server over WS
+    send({ type: 'supervisor:status' });
+    showToast('Services refreshed', 'success', 2000);
+    // loading cleared when the supervisor-status WS message arrives
   };
 
   const showNotification = (title: string, body: string) => {
@@ -233,12 +292,18 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
     });
   };
 
-  const handleSelectAll = () => {
-    if (selectedServices.size === filteredServices.length) {
-      setSelectedServices(new Set());
-    } else {
-      setSelectedServices(new Set(filteredServices.map(s => s.name)));
-    }
+  const handleSelectGroup = (groupServices: Service[]) => {
+    const groupNames = groupServices.map(s => s.name);
+    const allSelected = groupNames.every(n => selectedServices.has(n));
+    setSelectedServices(prev => {
+      const next = new Set(prev);
+      if (allSelected) {
+        groupNames.forEach(n => next.delete(n));
+      } else {
+        groupNames.forEach(n => next.add(n));
+      }
+      return next;
+    });
   };
 
   const handleCopyServiceName = (serviceName: string) => {
@@ -270,7 +335,7 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
       }, {} as GroupedServices)
     : { 'all': filteredServices };
 
-  const isConnected = connectionState === 'connected';
+  const isConnected = true; // always connected — server runs on the RDE itself
   const hasSelection = selectedServices.size > 0;
 
   return (
@@ -288,6 +353,7 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
         </div>
       ) : (
         <div className="services-panel">
+          <MachineStats />
           <div className="panel-header">
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <button
@@ -396,13 +462,14 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
                           <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
                             <input
                               type="checkbox"
-                              checked={groupServices.every(s => selectedServices.has(s.name))}
-                              onChange={handleSelectAll}
+                              checked={groupServices.length > 0 && groupServices.every(s => selectedServices.has(s.name))}
+                              onChange={() => handleSelectGroup(groupServices)}
                             />
                             Service
                           </label>
                         </th>}
                         {showColumns.state && <th>State</th>}
+                        <th style={{ whiteSpace: 'nowrap' }}>CPU / Mem</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
@@ -428,6 +495,25 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
                                   >
                                     {service.name}
                                   </span>
+                                  {(() => {
+                                    // service.name is like "backend-group:api" — venv key is "api"
+                                    const venvKey = service.name.includes(':') ? service.name.split(':')[1] : service.name;
+                                    const pyVersion = venvVersions[venvKey];
+                                    return pyVersion ? (
+                                      <span style={{
+                                        fontSize: '10px',
+                                        padding: '1px 5px',
+                                        borderRadius: '3px',
+                                        background: pyVersion.startsWith('3.10') ? '#1565c0' : '#6a1b9a',
+                                        color: '#fff',
+                                        fontFamily: 'monospace',
+                                        whiteSpace: 'nowrap',
+                                        marginLeft: '4px',
+                                      }}>
+                                        py{pyVersion}
+                                      </span>
+                                    ) : null;
+                                  })()}
                                 </div>
                               </td>
                             )}
@@ -438,6 +524,17 @@ export function ServicesPanel({ target, connectionState }: ServicesPanelProps) {
                                 </span>
                               </td>
                             )}
+                            <td>
+                              {(() => {
+                                const p = procs[service.name];
+                                if (!p || service.state !== 'RUNNING') return <span style={{ color: 'var(--text-color-secondary)', fontSize: '11px' }}>—</span>;
+                                return (
+                                  <span style={{ fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'nowrap', color: 'var(--text-color-secondary)' }}>
+                                    {p.cpu != null ? `${p.cpu.toFixed(1)}%` : '?'} · {fmtMem(p.memKb)}
+                                  </span>
+                                );
+                              })()}
+                            </td>
                             <td>
                               <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
                                 {service.state !== 'RUNNING' && (

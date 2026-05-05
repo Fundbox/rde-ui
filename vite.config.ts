@@ -4,7 +4,7 @@ import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
-  base: './',
+  base: '/rde-ui/',
   build: {
     outDir: 'dist',
     emptyOutDir: true,
@@ -15,4 +15,3 @@ export default defineConfig({
     },
   },
 });
-
