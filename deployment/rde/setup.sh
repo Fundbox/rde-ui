@@ -53,8 +53,6 @@ npm run build:web
 # ─── Patch /rde-ui/ and /rde-api/ into fundbox.conf (idempotent) ─────────────
 echo "Patching $FUNDBOX_CONF (idempotent)..."
 sudo python3 - <<'PYEOF'
-import re
-
 path = "/etc/nginx/sites-enabled/fundbox.conf"
 with open(path) as f:
     content = f.read()
@@ -127,9 +125,6 @@ with open(path, "w") as f:
 print("patched ok")
 PYEOF
 
-# Remove the old standalone rde-ui.conf (8887 port block — no longer needed)
-sudo rm -f /etc/nginx/sites-enabled/rde-ui.conf
-
 sudo nginx -t && sudo nginx -s reload
 
 # ─── Supervisor for the Node bridge ──────────────────────────────────────────
@@ -142,8 +137,9 @@ sudo supervisorctl reread
 sudo supervisorctl update
 sudo supervisorctl restart rde-ui 2>/dev/null || sudo supervisorctl start rde-ui
 
+HOST="$(hostname)"
 echo ""
 echo "=== Done! ==="
-echo "UI:  https://bchkhaidze-fbx-rde.fbx.im/rde-ui/"
-echo "API: https://bchkhaidze-fbx-rde.fbx.im/rde-api/supervisor/status"
+echo "UI:  https://${HOST}/rde-ui/"
+echo "API: https://${HOST}/rde-api/supervisor/status"
 echo "Logs: tail -f ${LOG_DIR}/rde-ui.log"
