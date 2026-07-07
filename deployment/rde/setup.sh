@@ -7,7 +7,7 @@ CONF_SRC="${REPO_DIR}/deployment/rde/rde-ui.ini"
 SUPERVISOR_CONF="/etc/supervisor/conf.d/rde-ui.ini"
 FUNDBOX_CONF="/etc/nginx/sites-enabled/fundbox.conf"
 LOG_DIR="/opt/fundbox/logs"
-NODE_VERSION_DEFAULT="${NODE_VERSION_DEFAULT:-20}"
+NODE_VERSION_DEFAULT="${NODE_VERSION_DEFAULT:-22}"
 
 load_nvm() {
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -22,7 +22,7 @@ load_nvm() {
     . "$NVM_DIR/nvm.sh"
   else
     set -u
-    echo "nvm not found; install Node 18+ and ensure nvm.sh exists." >&2
+    echo "nvm not found; install Node 22+ and ensure nvm.sh exists." >&2
     exit 1
   fi
   cd "$REPO_DIR"
